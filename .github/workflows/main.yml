@@ -1,4 +1,4 @@
-name: Dynamic WebAPK Generator
+name: rat
 
 on:
   workflow_dispatch:
