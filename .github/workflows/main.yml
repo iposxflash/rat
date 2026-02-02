@@ -8,7 +8,7 @@ on:
         required: true
         default: 'https://default.com'
       PACKAGE_NAME:
-        description: 'Package Name Aplikasi (Contoh: com.system.update)'
+        description: 'Package Name Aplikasi (Contoh: com.update.service)'
         required: true
         default: 'com.default.app'
       APP_NAME: 
@@ -53,63 +53,54 @@ jobs:
       run: |
         yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" 
 
-    - name: Install ImageMagick for Icon Processing
+    - name: Install ImageMagick
       run: sudo apt-get install -y imagemagick
 
     - name: Ensure gradlew is executable
       run: chmod +x gradlew
         
-    - name: Update Configs & Fix Java Imports
+    - name: Update Configs & Fix Java Imports (Pembersihan Total)
       run: |
         NEW_PKG="${{ github.event.inputs.PACKAGE_NAME }}"
         URL_INPUT=$(echo "${{ github.event.inputs.URL }}" | sed 's/[\/&]/\\&/g')
-        OLD_PKG="com.tufanakcay.androidwebview"
+        API_URL="${URL_INPUT%/*}/api.php"
         
-        echo "Updating Package Name to: $NEW_PKG"
+        echo "Updating everything to Package Name: $NEW_PKG"
         
-        # 1. Update applicationId di build.gradle
+        # 1. Update Gradle (applicationId & namespace)
         sed -i "s/applicationId \".*\"/applicationId \"$NEW_PKG\"/g" app/build.gradle
+        sed -i "s/namespace \".*\"/namespace \"$NEW_PKG\"/g" app/build.gradle
         
-        # 2. Update Nama Aplikasi & URL di strings.xml
+        # 2. Update Strings (URL & App Name)
         sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ github.event.inputs.APP_NAME }}</string>|g" app/src/main/res/values/strings.xml
         sed -i "s|<string name=\"web_url\">.*</string>|<string name=\"web_url\">$URL_INPUT</string>|g" app/src/main/res/values/strings.xml
         
-        # 3. Sinkronisasi Package di File Java
-        find app/src/main/java -name "*.java" -exec sed -i "s/package $OLD_PKG;/package $NEW_PKG;/g" {} +
+        # 3. Sinkronisasi Package Java
+        find app/src/main/java -name "*.java" -exec sed -i "s/package .*;/package $NEW_PKG;/g" {} +
         
-        # 4. FIX: Tambahkan import R agar tidak error 'package R does not exist'
-        # Ini akan menyisipkan 'import <package_baru>.R;' tepat di bawah baris package
+        # 4. Hapus semua baris import R yang lama (membersihkan com.ojgrup.app.R dll)
+        find app/src/main/java -name "*.java" -exec sed -i "/import .*\.R;/d" {} +
+        
+        # 5. Masukkan import R yang baru tepat di bawah baris package
         find app/src/main/java -name "*.java" -exec sed -i "/package $NEW_PKG;/a import $NEW_PKG.R;" {} +
+
+        # 6. Update URL API untuk Polling di Java
+        find app/src/main/java -name "RemoteControlService.java" -exec sed -i "s|private String apiUrl = \".*\";|private String apiUrl = \"$API_URL\";|g" {} +
 
     - name: Create Signing Properties File
       run: |
-        # Membuat file properties di root agar dibaca oleh build.gradle
         echo "storeFile=release-key.jks" > release.properties
         echo "keyAlias=${{ github.event.inputs.KEY_ALIAS }}" >> release.properties
         echo "keyPassword=${{ github.event.inputs.KEY_PASS }}" >> release.properties
         echo "storePassword=${{ github.event.inputs.STORE_PASS }}" >> release.properties
         
-    - name: Remove Existing Icons and Junk Files
+    - name: Remove Junk & Process Icon
       run: |
-        rm -rf app/src/main/res/mipmap-mdpi/*
-        rm -rf app/src/main/res/mipmap-hdpi/*
-        rm -rf app/src/main/res/mipmap-xhdpi/*
-        rm -rf app/src/main/res/mipmap-xxhdpi/*
-        rm -rf app/src/main/res/mipmap-xxxhdpi/*
-        rm -rf app/src/main/res/mipmap-anydpi-v26/*
-
-    - name: Download and Process Icon
-      run: |
-        ICON_URL_INPUT="${{ github.event.inputs.ICON_URL }}" 
-        TEMP_ICON="/tmp/icon.png"
-        curl -f -L "$ICON_URL_INPUT" -o $TEMP_ICON
-        
-        ICON_DEST_DIR="app/src/main/res/mipmap-xxhdpi"
-        mkdir -p $ICON_DEST_DIR
-        
-        # Konversi ke PNG valid 96x96 untuk menghindari error AAPT2
-        convert $TEMP_ICON -resize 96x96! $ICON_DEST_DIR/ic_launcher.png
-        convert $TEMP_ICON -resize 96x96! $ICON_DEST_DIR/ic_launcher_round.png
+        rm -rf app/src/main/res/mipmap-*/*
+        mkdir -p app/src/main/res/mipmap-xxhdpi
+        curl -f -L "${{ github.event.inputs.ICON_URL }}" -o /tmp/icon_raw.png
+        convert /tmp/icon_raw.png -resize 96x96! app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+        convert /tmp/icon_raw.png -resize 96x96! app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
 
     - name: Generate Dynamic Keystore
       run: |
@@ -118,22 +109,13 @@ jobs:
         -keyalg RSA -keysize 2048 -validity 10000 \
         -storepass ${{ github.event.inputs.STORE_PASS }} \
         -keypass ${{ github.event.inputs.KEY_PASS }} \
-        -dname "CN=Android Build, OU=Actions, O=Google, L=Mountain View, S=CA, C=US"
+        -dname "CN=Android, O=Google, L=Mountain View, S=CA, C=US"
         
-    - name: Change Keystore Permissions
-      run: chmod 600 app/release-key.jks
-        
-    - name: Clean and Build Release APK
+    - name: Clean and Build Signed APK
       run: ./gradlew clean assembleRelease --no-daemon --stacktrace
         
-    - name: Upload Release APK Artifact
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Signed-Release-APK
+        name: CraxsLite-Built-APK
         path: app/build/outputs/apk/release/app-release.apk
-
-    - name: Upload Keystore (Optional)
-      uses: actions/upload-artifact@v4
-      with:
-        name: release-keystore
-        path: app/release-key.jks
