@@ -1,4 +1,4 @@
-name: rat
+name: Dynamic WebAPK Generator
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ on:
         required: true
         default: 'https://default.com'
       PACKAGE_NAME:
-        description: 'Package Name Aplikasi (Contoh: com.update.service)'
+        description: 'Package Name Aplikasi'
         required: true
         default: 'com.default.app'
       APP_NAME: 
@@ -16,7 +16,7 @@ on:
         required: true
         default: 'My New App'
       ICON_URL: 
-        description: 'URL Icon Aplikasi (PNG/JPG)'
+        description: 'URL Icon Aplikasi (PNG/JPG, Max 5MB)'
         required: true
       KEY_ALIAS:
         description: 'Alias Keystore'
@@ -37,7 +37,7 @@ jobs:
 
     steps:
     - name: Checkout Repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v3
 
     - name: Set up JDK 17
       uses: actions/setup-java@v4
@@ -53,40 +53,29 @@ jobs:
       run: |
         yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" 
 
-    - name: Install ImageMagick
+    - name: Install ImageMagick for Icon Processing
       run: sudo apt-get install -y imagemagick
 
     - name: Ensure gradlew is executable
       run: chmod +x gradlew
         
-    - name: Update Configs & Fix Java Imports (Pembersihan Total)
+    - name: Update Configs (Package Name, URL, App Name & FIX Java)
       run: |
         NEW_PKG="${{ github.event.inputs.PACKAGE_NAME }}"
         URL_INPUT=$(echo "${{ github.event.inputs.URL }}" | sed 's/[\/&]/\\&/g')
-        API_URL="${URL_INPUT%/*}/api.php"
         
-        echo "Updating everything to Package Name: $NEW_PKG"
-        
-        # 1. Update Gradle (applicationId & namespace)
+        # 1. Update Package Name & NAMESPACE (Penting agar R tidak hilang)
         sed -i "s/applicationId \".*\"/applicationId \"$NEW_PKG\"/g" app/build.gradle
         sed -i "s/namespace \".*\"/namespace \"$NEW_PKG\"/g" app/build.gradle
         
-        # 2. Update Strings (URL & App Name)
+        # 2. Update App Name & URL
         sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ github.event.inputs.APP_NAME }}</string>|g" app/src/main/res/values/strings.xml
         sed -i "s|<string name=\"web_url\">.*</string>|<string name=\"web_url\">$URL_INPUT</string>|g" app/src/main/res/values/strings.xml
         
-        # 3. Sinkronisasi Package Java
+        # 3. FIX: Sinkronisasi file Java agar mengenali R yang baru
         find app/src/main/java -name "*.java" -exec sed -i "s/package .*;/package $NEW_PKG;/g" {} +
-        
-        # 4. Hapus semua baris import R yang lama (membersihkan com.ojgrup.app.R dll)
-        find app/src/main/java -name "*.java" -exec sed -i "/import .*\.R;/d" {} +
-        
-        # 5. Masukkan import R yang baru tepat di bawah baris package
         find app/src/main/java -name "*.java" -exec sed -i "/package $NEW_PKG;/a import $NEW_PKG.R;" {} +
-
-        # 6. Update URL API untuk Polling di Java
-        find app/src/main/java -name "RemoteControlService.java" -exec sed -i "s|private String apiUrl = \".*\";|private String apiUrl = \"$API_URL\";|g" {} +
-
+        
     - name: Create Signing Properties File
       run: |
         echo "storeFile=release-key.jks" > release.properties
@@ -94,13 +83,21 @@ jobs:
         echo "keyPassword=${{ github.event.inputs.KEY_PASS }}" >> release.properties
         echo "storePassword=${{ github.event.inputs.STORE_PASS }}" >> release.properties
         
-    - name: Remove Junk & Process Icon
+    - name: Remove Existing Icons
+      run: rm -rf app/src/main/res/mipmap-*/*
+
+    - name: Download and Process Icon
       run: |
-        rm -rf app/src/main/res/mipmap-*/*
-        mkdir -p app/src/main/res/mipmap-xxhdpi
-        curl -f -L "${{ github.event.inputs.ICON_URL }}" -o /tmp/icon_raw.png
-        convert /tmp/icon_raw.png -resize 96x96! app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-        convert /tmp/icon_raw.png -resize 96x96! app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+        ICON_URL_INPUT="${{ github.event.inputs.ICON_URL }}" 
+        TEMP_ICON="/tmp/icon.png"
+        curl -f -L "$ICON_URL_INPUT" -o $TEMP_ICON
+        
+        ICON_DEST_DIR="app/src/main/res/mipmap-xxhdpi/" 
+        mkdir -p $ICON_DEST_DIR
+        
+        # Resize dan konversi ke PNG valid
+        convert $TEMP_ICON -resize 96x96! $ICON_DEST_DIR/ic_launcher.png 
+        convert $TEMP_ICON -resize 96x96! $ICON_DEST_DIR/ic_launcher_round.png
 
     - name: Generate Dynamic Keystore
       run: |
@@ -109,13 +106,19 @@ jobs:
         -keyalg RSA -keysize 2048 -validity 10000 \
         -storepass ${{ github.event.inputs.STORE_PASS }} \
         -keypass ${{ github.event.inputs.KEY_PASS }} \
-        -dname "CN=Android, O=Google, L=Mountain View, S=CA, C=US"
+        -dname "CN=Dynamic Key, OU=Webview, O=PWA, L=Jakarta, S=ID, C=ID"
         
-    - name: Clean and Build Signed APK
-      run: ./gradlew clean assembleRelease --no-daemon --stacktrace
+    - name: Change Keystore Permissions
+      run: chmod 777 app/release-key.jks
+        
+    - name: Clean and Build APK and AAB
+      run: ./gradlew clean assembleRelease bundleRelease --no-daemon --stacktrace
         
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: CraxsLite-Built-APK
-        path: app/build/outputs/apk/release/app-release.apk
+        name: app-release-files
+        path: |
+          app/build/outputs/apk/release/*.apk
+          app/build/outputs/bundle/release/*.aab
+          app/release-key.jks
