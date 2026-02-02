@@ -1,0 +1,167 @@
+name: Dynamic WebAPK Generator
+
+on:
+  workflow_dispatch:
+    inputs:
+      URL:
+        description: 'URL Website Utama'
+        required: true
+        default: 'https://default.com'
+      PACKAGE_NAME:
+        description: 'Package Name Aplikasi'
+        required: true
+        default: 'com.default.app'
+      APP_NAME: 
+        description: 'Nama Aplikasi (Muncul di layar)'
+        required: true
+        default: 'My New App'
+      ICON_URL: 
+        description: 'URL Icon Aplikasi (PNG/JPG, Max 5MB)'
+        required: true
+      KEY_ALIAS:
+        description: 'Alias Keystore'
+        required: true
+        default: 'mykey'
+      KEY_PASS:
+        description: 'Password Kunci'
+        required: true
+        default: 'android'
+      STORE_PASS:
+        description: 'Password Store'
+        required: true
+        default: 'android'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    # 1. SETUP JAVA JDK 17
+    - name: Set up JDK 17
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+        cache: gradle
+
+    # 2. SETUP ANDROID PATH/ENVIRONMENT (Mencegah 'sdkmanager: command not found')
+    - name: Setup Android SDK Environment 🛠️
+      uses: android-actions/setup-android@v3 
+
+    # 3. INSTALASI KOMPONEN SDK 34 (Setelah environment disiapkan)
+    - name: Install Android SDK Components (API 34) 🚀
+      run: |
+        # Menggunakan 'yes |' untuk menerima lisensi secara otomatis
+        yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" 
+
+    # 4. INSTALASI IMAGE MAGICK (Untuk perbaikan ikon AAPT2)
+    - name: Install ImageMagick for Icon Processing
+      run: sudo apt-get install -y imagemagick
+
+    - name: Ensure gradlew is executable
+      run: chmod +x gradlew
+        
+    - name: Update Configs (Package Name, URL, dan App Name)
+      run: |
+        # Menggunakan escape karakter untuk URL agar aman dari masalah Bash
+        URL_INPUT=$(echo "${{ github.event.inputs.URL }}" | sed 's/[\/&]/\\&/g')
+        
+        # 1. Update Package Name
+        sed -i "s/applicationId \".*\"/applicationId \"${{ github.event.inputs.PACKAGE_NAME }}\"/g" app/build.gradle
+        
+        # 2. Update App Name
+        sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ github.event.inputs.APP_NAME }}</string>|g" app/src/main/res/values/strings.xml
+        
+        # 3. Update URL (Menggunakan delimiter ; dan variabel yang di-escape)
+        sed -i "s;<string name=\"web_url\">.*</string>;<string name=\"web_url\">$URL_INPUT</string>;g" app/src/main/res/values/strings.xml
+        
+    - name: Create Signing Properties File
+      run: |
+        echo "storeFile=release-key.jks" > release.properties
+        echo "keyAlias=${{ github.event.inputs.KEY_ALIAS }}" >> release.properties
+        echo "keyPassword=${{ github.event.inputs.KEY_PASS }}" >> release.properties
+        echo "storePassword=${{ github.event.inputs.STORE_PASS }}" >> release.properties
+        
+    - name: Remove Existing Icons and Junk Files
+      run: |
+        echo "Starting ultimate cleanup of all files inside mipmap folders..."
+        rm -rf app/src/main/res/mipmap-mdpi/*
+        rm -rf app/src/main/res/mipmap-hdpi/*
+        rm -rf app/src/main/res/mipmap-xhdpi/*
+        rm -rf app/src/main/res/mipmap-xxhdpi/*
+        rm -rf app/src/main/res/mipmap-xxxhdpi/*
+        rm -rf app/src/main/res/mipmap-anydpi-v26/*
+        echo "Ultimate cleanup complete."
+
+    # 5. DOWNLOAD DAN KONVERSI IKON (Mencegah Aapt2Exception)
+    - name: Download Icon from URL and Save
+      run: |
+        ICON_URL_INPUT="${{ github.event.inputs.ICON_URL }}" 
+        TEMP_DIR="/tmp/icon_download"
+        mkdir -p $TEMP_DIR
+        
+        # 1. Unduh file mentah ke direktori sementara
+        echo "Downloading icon from: $ICON_URL_INPUT"
+        curl -f -L "$ICON_URL_INPUT" -o $TEMP_DIR/temp_icon.png
+        
+        # Validasi Ikon
+        if [ ! -s $TEMP_DIR/temp_icon.png ]; then
+            echo "ERROR: File icon tidak diunduh atau ukurannya 0 byte."
+            exit 1
+        fi
+        
+        FILE_TYPE=$(file -b --mime-type $TEMP_DIR/temp_icon.png)
+        echo "Downloaded icon file type: $FILE_TYPE"
+        
+        if [[ "$FILE_TYPE" != "image/png" && "$FILE_TYPE" != "image/jpeg" ]]; then
+            echo "ERROR: File yang diunduh BUKAN file gambar (PNG/JPEG)."
+            exit 1
+        fi
+
+        # 2. KONVERSI DAN OPTIMASI (Mengatasi Aapt2Exception)
+        # ImageMagick mengkonversi gambar ke PNG yang valid dan mengatur ukuran.
+        ICON_DEST_DIR="app/src/main/res/mipmap-xxhdpi/" 
+        mkdir -p $ICON_DEST_DIR
+        
+        echo "Converting and optimizing icon using ImageMagick..."
+        # Menggunakan -resize 96x96! (misalnya) untuk force resize dan format PNG yang bersih
+        convert $TEMP_DIR/temp_icon.png -resize 96x96! $ICON_DEST_DIR/ic_launcher.png 
+        convert $TEMP_DIR/temp_icon.png -resize 96x96! $ICON_DEST_DIR/ic_launcher_round.png
+
+        echo "Icon files created in $ICON_DEST_DIR"
+
+    - name: Generate Dynamic Keystore
+      run: |
+        keytool -genkey -v -keystore app/release-key.jks \
+        -alias ${{ github.event.inputs.KEY_ALIAS }} \
+        -keyalg RSA -keysize 2048 -validity 10000 \
+        -storepass ${{ github.event.inputs.STORE_PASS }} \
+        -keypass ${{ github.event.inputs.KEY_PASS }} \
+        -dname "CN=Dynamic Key, OU=Webview, O=PWA, L=Jakarta, S=ID, C=ID"
+        
+    - name: Change Keystore Permissions
+      run: chmod 777 app/release-key.jks
+        
+    - name: Clean and Build APK and AAB (Release Signed)
+      run: ./gradlew clean assembleRelease bundleRelease --no-daemon --stacktrace
+        
+    - name: Upload Dynamic Keystore Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-keystore
+        path: app/release-key.jks
+        
+    - name: Upload Release APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-release-signed-apk
+        path: app/build/outputs/apk/release/app-release.apk
+
+    - name: Upload Release AAB Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: app-release-signed-aab
+        path: app/build/outputs/bundle/release/app-release.aab
