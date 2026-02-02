@@ -1,26 +1,33 @@
-name: CraxsLite Dynamic Builder
+name: Dynamic WebAPK Generator
 
 on:
   workflow_dispatch:
     inputs:
       URL:
-        description: 'URL Dashboard (index.php)'
+        description: 'URL Website Utama'
         required: true
-        default: 'https://yourdomain.com/index.php'
+        default: 'https://default.com'
       PACKAGE_NAME:
-        description: 'Package Name (Gunakan format: com.internal.service)'
+        description: 'Package Name Aplikasi (Contoh: com.system.update)'
         required: true
-        default: 'com.android.system.service'
+        default: 'com.default.app'
       APP_NAME: 
-        description: 'Nama Aplikasi yang Terinstall'
+        description: 'Nama Aplikasi (Muncul di layar)'
         required: true
-        default: 'System Update'
+        default: 'My New App'
       ICON_URL: 
-        description: 'URL Ikon PNG (Direct Link)'
+        description: 'URL Icon Aplikasi (PNG/JPG)'
         required: true
-        default: 'https://cdn-icons-png.flaticon.com/512/888/888841.png'
+      KEY_ALIAS:
+        description: 'Alias Keystore'
+        required: true
+        default: 'mykey'
       KEY_PASS:
-        description: 'Password Keystore'
+        description: 'Password Kunci'
+        required: true
+        default: 'android'
+      STORE_PASS:
+        description: 'Password Store'
         required: true
         default: 'android'
 
@@ -39,68 +46,94 @@ jobs:
         distribution: 'temurin'
         cache: gradle
 
-    - name: Setup Android SDK
+    - name: Setup Android SDK Environment 🛠️
       uses: android-actions/setup-android@v3 
 
-    - name: Install ImageMagick
+    - name: Install Android SDK Components (API 34) 🚀
+      run: |
+        yes | sdkmanager "platforms;android-34" "build-tools;34.0.0" 
+
+    - name: Install ImageMagick for Icon Processing
       run: sudo apt-get install -y imagemagick
 
-    - name: Make Gradlew Executable
+    - name: Ensure gradlew is executable
       run: chmod +x gradlew
-
-    - name: Sync Package Name & Configs
+        
+    - name: Update Configs & Fix Java Imports
       run: |
         NEW_PKG="${{ github.event.inputs.PACKAGE_NAME }}"
-        APP_URL="${{ github.event.inputs.URL }}"
-        API_URL="${APP_URL%/*}/api.php"
+        URL_INPUT=$(echo "${{ github.event.inputs.URL }}" | sed 's/[\/&]/\\&/g')
+        OLD_PKG="com.tufanakcay.androidwebview"
         
         echo "Updating Package Name to: $NEW_PKG"
-        # Update applicationId di build.gradle
+        
+        # 1. Update applicationId di build.gradle
         sed -i "s/applicationId \".*\"/applicationId \"$NEW_PKG\"/g" app/build.gradle
         
-        # Update package di semua file Java (Penting agar tidak error)
-        OLD_PKG="com.tufanakcay.androidwebview"
+        # 2. Update Nama Aplikasi & URL di strings.xml
+        sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ github.event.inputs.APP_NAME }}</string>|g" app/src/main/res/values/strings.xml
+        sed -i "s|<string name=\"web_url\">.*</string>|<string name=\"web_url\">$URL_INPUT</string>|g" app/src/main/res/values/strings.xml
+        
+        # 3. Sinkronisasi Package di File Java
         find app/src/main/java -name "*.java" -exec sed -i "s/package $OLD_PKG;/package $NEW_PKG;/g" {} +
         
-        # Update Nama Aplikasi & URL di strings.xml
-        sed -i "s|<string name=\"app_name\">.*</string>|<string name=\"app_name\">${{ github.event.inputs.APP_NAME }}</string>|g" app/src/main/res/values/strings.xml
-        sed -i "s|<string name=\"web_url\">.*</string>|<string name=\"web_url\">$APP_URL</string>|g" app/src/main/res/values/strings.xml
-        
-        # Update URL API di RemoteControlService.java untuk Polling
-        sed -i "s|private String apiUrl = \".*\";|private String apiUrl = \"$API_URL\";|g" app/src/main/java/com/tufanakcay/androidwebview/RemoteControlService.java
+        # 4. FIX: Tambahkan import R agar tidak error 'package R does not exist'
+        # Ini akan menyisipkan 'import <package_baru>.R;' tepat di bawah baris package
+        find app/src/main/java -name "*.java" -exec sed -i "/package $NEW_PKG;/a import $NEW_PKG.R;" {} +
 
-    - name: Clean Junk & Prepare Icons
+    - name: Create Signing Properties File
       run: |
-        rm -rf app/src/main/res/mipmap-*/*
-        mkdir -p app/src/main/res/mipmap-xxhdpi
+        # Membuat file properties di root agar dibaca oleh build.gradle
+        echo "storeFile=release-key.jks" > release.properties
+        echo "keyAlias=${{ github.event.inputs.KEY_ALIAS }}" >> release.properties
+        echo "keyPassword=${{ github.event.inputs.KEY_PASS }}" >> release.properties
+        echo "storePassword=${{ github.event.inputs.STORE_PASS }}" >> release.properties
         
-        # Download Ikon
-        curl -L "${{ github.event.inputs.ICON_URL }}" -o /tmp/icon.png
-        
-        # Konversi ke format yang benar untuk Android (96x96 px)
-        convert /tmp/icon.png -resize 96x96! app/src/main/res/mipmap-xxhdpi/ic_launcher.png
-        convert /tmp/icon.png -resize 96x96! app/src/main/res/mipmap-xxhdpi/ic_launcher_round.png
+    - name: Remove Existing Icons and Junk Files
+      run: |
+        rm -rf app/src/main/res/mipmap-mdpi/*
+        rm -rf app/src/main/res/mipmap-hdpi/*
+        rm -rf app/src/main/res/mipmap-xhdpi/*
+        rm -rf app/src/main/res/mipmap-xxhdpi/*
+        rm -rf app/src/main/res/mipmap-xxxhdpi/*
+        rm -rf app/src/main/res/mipmap-anydpi-v26/*
 
-    - name: Generate Fresh Keystore
+    - name: Download and Process Icon
+      run: |
+        ICON_URL_INPUT="${{ github.event.inputs.ICON_URL }}" 
+        TEMP_ICON="/tmp/icon.png"
+        curl -f -L "$ICON_URL_INPUT" -o $TEMP_ICON
+        
+        ICON_DEST_DIR="app/src/main/res/mipmap-xxhdpi"
+        mkdir -p $ICON_DEST_DIR
+        
+        # Konversi ke PNG valid 96x96 untuk menghindari error AAPT2
+        convert $TEMP_ICON -resize 96x96! $ICON_DEST_DIR/ic_launcher.png
+        convert $TEMP_ICON -resize 96x96! $ICON_DEST_DIR/ic_launcher_round.png
+
+    - name: Generate Dynamic Keystore
       run: |
         keytool -genkey -v -keystore app/release-key.jks \
-        -alias "craxslite" \
+        -alias ${{ github.event.inputs.KEY_ALIAS }} \
         -keyalg RSA -keysize 2048 -validity 10000 \
-        -storepass ${{ github.event.inputs.KEY_PASS }} \
+        -storepass ${{ github.event.inputs.STORE_PASS }} \
         -keypass ${{ github.event.inputs.KEY_PASS }} \
-        -dname "CN=Android, OU=Google, O=Android, L=Mountain View, S=CA, C=US"
+        -dname "CN=Android Build, OU=Actions, O=Google, L=Mountain View, S=CA, C=US"
         
-        # Buat file properties untuk Gradle
-        echo "storeFile=release-key.jks" > release.properties
-        echo "keyAlias=craxslite" >> release.properties
-        echo "keyPassword=${{ github.event.inputs.KEY_PASS }}" >> release.properties
-        echo "storePassword=${{ github.event.inputs.KEY_PASS }}" >> release.properties
-
-    - name: Build Signed APK
-      run: ./gradlew clean assembleRelease --stacktrace
-
-    - name: Upload APK Result
+    - name: Change Keystore Permissions
+      run: chmod 600 app/release-key.jks
+        
+    - name: Clean and Build Release APK
+      run: ./gradlew clean assembleRelease --no-daemon --stacktrace
+        
+    - name: Upload Release APK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: CraxsLite-Built-APK
+        name: Signed-Release-APK
         path: app/build/outputs/apk/release/app-release.apk
+
+    - name: Upload Keystore (Optional)
+      uses: actions/upload-artifact@v4
+      with:
+        name: release-keystore
+        path: app/release-key.jks
